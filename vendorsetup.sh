@@ -1,10 +1,2 @@
-#
-# Copyright (C) 2026 The Android Open Source Project
-# Copyright (C) 2026 SebaUbuntu's TWRP device tree generator
-#
-# SPDX-License-Identifier: Apache-2.0
-#
-
-add_lunch_combo lineage_X6525-user
-add_lunch_combo lineage_X6525-userdebug
-add_lunch_combo lineage_X6525-eng
+#!/bin/bash
+# Handled by COMMON_LUNCH_CHOICES in AndroidProducts.mk
