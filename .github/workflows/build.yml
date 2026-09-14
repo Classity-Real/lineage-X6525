@@ -3,25 +3,25 @@ name: Build Lineage Recovery
 on:
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 360
 
     steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
-                      /opt/ghc /opt/hostedtoolcache/CodeQL \
-                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
-          sudo apt-get clean
-          df -h /
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 512
+          swap-size-mb: 8192
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+          overprovision-lvm: 'true'
 
-      - name: Install build deps
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -32,6 +32,23 @@ jobs:
             schedtool squashfs-tools xsltproc zip zlib1g-dev \
             python3 python-is-python3 openjdk-11-jdk
 
+      - name: Install repo tool
+        run: |
+          mkdir -p ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Configure git and ccache
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          echo "USE_CCACHE=1" >> $GITHUB_ENV
+          echo "CCACHE_EXEC=$(which ccache)" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=20G" >> $GITHUB_ENV
+
       - name: Cache repo
         uses: actions/cache@v4
         with:
@@ -39,97 +56,80 @@ jobs:
             ~/lineage/.repo
             ~/lineage/.repo/projects
             ~/lineage/.repo/project-objects
-          key: repo-lineage-20-${{ hashFiles('local_manifests/*.xml') }}
-          restore-keys: |
-            repo-lineage-20-
+          key: reposync-lineage20-v1
+          restore-keys: reposync-lineage20-
 
       - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ github.sha }}
-          restore-keys: ccache-
+          key: ccache-lineage20-v1
+          restore-keys: ccache-lineage20-
 
-      - name: Configure git & ccache
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          git config --global color.ui false
-          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
-          echo "USE_CCACHE=1" >> $GITHUB_ENV
-          echo "CCACHE_EXEC=$(which ccache)" >> $GITHUB_ENV
-          echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=20G" >> $GITHUB_ENV
-
-      - name: Install repo
-        run: |
-          mkdir -p ~/bin
-          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-          chmod a+x ~/bin/repo
-          echo "$HOME/bin" >> $GITHUB_PATH
-
-      - name: Init LineageOS 20
+      - name: Init LineageOS 20.0
         run: |
           mkdir -p ~/lineage && cd ~/lineage
           repo init \
+            -u https://github.com/LineageOS/android.git \
+            -b lineage-20.0 \
             --depth=1 \
             --partial-clone \
             --clone-filter=blob:none \
-            --no-tags \
-            -u https://github.com/LineageOS/android.git \
-            -b lineage-20.0
-            
+            --no-tags
+
       - name: Checkout device tree
         uses: actions/checkout@v4
         with:
           path: _device_tree
 
-      - name: Place device tree & local manifest
+      - name: Place device tree
         run: |
           mkdir -p ~/lineage/device/infinix/X6525
           cp -a _device_tree/. ~/lineage/device/infinix/X6525/
-          mkdir -p ~/lineage/.repo/local_manifests
-          cp _device_tree/local_manifests/roomservice.xml \
-             ~/lineage/.repo/local_manifests/roomservice.xml
-
-      - name: Decompress prebuilt kernel
-        run: |
-          cd ~/lineage/device/infinix/X6525/prebuilt
-          if [ -f kernel.gz ]; then
-            echo "Decompressing kernel.gz..."
-            gunzip -k -f kernel.gz
-            rm -f kernel.gz
-          fi
-          ls -la
-          file kernel
-          if head -c 2 kernel | xxd | grep -q '1f8b'; then
-            echo "::error::kernel is still compressed!"
-            exit 1
-          fi
-          echo "✅ Kernel is decompressed and ready."
 
       - name: Sync sources
         run: |
           cd ~/lineage
-          repo sync -c -j$(nproc --all) \
+          repo sync -c -j4 \
             --force-sync --no-clone-bundle --no-tags \
             --optimized-fetch --prune
 
-      - name: Build recovery
+      - name: Decompress kernel
+        run: |
+          cd ~/lineage/device/infinix/X6525/prebuilt
+          if [ -f kernel.gz ]; then
+            gunzip -f kernel.gz
+          fi
+          echo "=== prebuilt contents ==="
+          ls -la
+          echo "=== kernel type ==="
+          file kernel || true
+          echo "=== dtb type ==="
+          file dtb.img || true
+
+      - name: Build Lineage Recovery
         run: |
           cd ~/lineage
           source build/envsetup.sh
           ccache -M 20G
+          ccache -z
           lunch lineage_X6525-userdebug
-          mka recoveryimage -j2
+          mka vendor_bootimage -j1
 
-      - name: Upload recovery image
+      - name: List build outputs
+        if: always()
+        run: |
+          echo "=== Build outputs ==="
+          ls -la ~/lineage/out/target/product/X6525/*.img 2>/dev/null || echo "No .img files found"
+          find ~/lineage/out/target/product/X6525 -maxdepth 2 -name "*.img" 2>/dev/null
+
+      - name: Upload vendor_boot
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: recovery-X6525-${{ github.run_number }}
-          path: |
-            ~/lineage/out/target/product/X6525/recovery.img
-          if-no-files-found: error
+          name: lineage-X6525-vendor_boot
+          path: ~/lineage/out/target/product/X6525/vendor_boot.img
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Show ccache stats
