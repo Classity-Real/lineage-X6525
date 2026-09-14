@@ -79,8 +79,8 @@ jobs:
             --clone-filter=blob:none \
             --no-tags \
             -u https://github.com/LineageOS/android.git \
-            -b lineage-20
-
+            -b lineage-20.0
+            
       - name: Checkout device tree
         uses: actions/checkout@v4
         with:
